@@ -144,8 +144,8 @@ def run(cfg: dict, items: list[tuple[int, int]], processes: int | None = None, *
     """
     import multiprocessing as mp
     from .distributed import _env_setup
-    if not items or (processes is not None and processes < 1):
-        raise ValueError('require games and a positive process count')
+    if not items or (processes is not None and processes < 0):
+        raise ValueError('require games and a nonnegative process count (0 = automatic)')
     if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
         raise ValueError('timeout must be positive and finite')
     _env_setup()   # inherited by the spawned workers before they initialise jax
@@ -170,10 +170,14 @@ def run(cfg: dict, items: list[tuple[int, int]], processes: int | None = None, *
                     raise TimeoutError('search arena wall-time limit reached') from error
                 if on_result is not None:
                     on_result(row)
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError('search arena wall-time limit reached')
                 rows.append(row)
     finally:
+        # Workers no longer need these tokens; a full feeder pipe must not make
+        # timeout/error cleanup wait for consumers that have been terminated.
+        queue.cancel_join_thread()
         queue.close()
-        queue.join_thread()
     return rows
 
 

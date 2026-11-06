@@ -56,9 +56,10 @@ def pool(monkeypatch):
     return instance
 
 
-def test_run_preserves_default_and_streams_rows(pool) -> None:
+@pytest.mark.parametrize('processes', [None, 0, 1])
+def test_run_preserves_default_and_streams_rows(pool, processes) -> None:
     received = []
-    rows = search_arena.run({}, [(1, 1), (1, 2)], processes=1, on_result=received.append)
+    rows = search_arena.run({}, [(1, 1), (1, 2)], processes=processes, on_result=received.append)
     assert rows == received == [{'seed': 1}, {'seed': 2}]
     assert pool.closed and pool.timeouts == [None, None]
 
@@ -89,3 +90,17 @@ def test_expired_deadline_closes_pool(pool, monkeypatch) -> None:
     with pytest.raises(TimeoutError, match='wall-time'):
         search_arena.run({}, [(1, 1)], processes=1, timeout=1)
     assert pool.closed and not pool.timeouts
+
+
+def test_final_callback_cannot_turn_a_late_run_into_success(pool, monkeypatch) -> None:
+    clock = [0.]
+    monkeypatch.setattr(search_arena.time, 'monotonic', lambda: clock[0])
+    saved = []
+
+    def slow_save(row: dict) -> None:
+        saved.append(row)
+        clock[0] = 2.
+
+    with pytest.raises(TimeoutError, match='wall-time'):
+        search_arena.run({}, [(1, 1)], processes=1, timeout=1, on_result=slow_save)
+    assert saved == [{'seed': 1}] and pool.closed
