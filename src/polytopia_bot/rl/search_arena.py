@@ -10,6 +10,8 @@ Every replayed sub-action goes through engine-rs and must be legal.
 Per game we record outcome, search compute time, how often search overrode the
 greedy turn, and the critic's score of the greedy turn (for calibration).
 """
+# Modified by JackYBT: bounded incremental execution and separate draw/truncation reporting.
+from collections.abc import Callable
 import json
 import math
 import os
@@ -133,10 +135,19 @@ def _play(item):
     return row
 
 
-def run(cfg, items, processes=None):
-    """Plays items [(seed, seat)] with one process per core; returns per-game rows."""
+def run(cfg: dict, items: list[tuple[int, int]], processes: int | None = None, *,
+        timeout: float | None = None, on_result: Callable[[dict], None] | None = None) -> list[dict]:
+    """Play items, optionally saving each row and bounding pool startup + all games.
+
+    A callback failure or deadline terminates the pool. Without the new keyword
+    arguments this retains the original return-all-rows behavior.
+    """
     import multiprocessing as mp
     from .distributed import _env_setup
+    if not items or (processes is not None and processes < 1):
+        raise ValueError('require games and a positive process count')
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError('timeout must be positive and finite')
     _env_setup()   # inherited by the spawned workers before they initialise jax
     cores = sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else [None]
     processes = min(processes or len(cores), len(items))
@@ -144,8 +155,26 @@ def run(cfg, items, processes=None):
     queue = ctx.Queue()
     for i in range(processes):
         queue.put(cores[i % len(cores)] if len(cores) >= processes else None)
-    with ctx.Pool(processes, initializer=_init, initargs=(cfg, queue)) as pool:
-        return list(pool.imap_unordered(_play, items))
+    deadline = None if timeout is None else time.monotonic() + timeout
+    rows = []
+    try:
+        with ctx.Pool(processes, initializer=_init, initargs=(cfg, queue)) as pool:
+            results = pool.imap_unordered(_play, items)
+            for _ in items:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError('search arena wall-time limit reached')
+                try:
+                    row = results.next(timeout=remaining)
+                except mp.TimeoutError as error:
+                    raise TimeoutError('search arena wall-time limit reached') from error
+                if on_result is not None:
+                    on_result(row)
+                rows.append(row)
+    finally:
+        queue.close()
+        queue.join_thread()
+    return rows
 
 
 def elo(score):
@@ -178,7 +207,8 @@ def summarize(rows):
             units[u] = units.get(u, 0) + c
     total_units = sum(units.values())
     return dict(
-        games=n, wins=int(wins), losses=int(losses), truncations=int(draws), win_rate=wins / max(n, 1),
+        games=n, wins=int(wins), losses=int(losses), draws=int(draws),
+        truncations=sum(bool(r['truncated']) for r in rows), win_rate=wins / max(n, 1),
         win_ci95=[float(np.percentile(win_boot, 2.5)), float(np.percentile(win_boot, 97.5))],
         score=score, score_ci95=[float(np.percentile(score_boot, 2.5)), float(np.percentile(score_boot, 97.5))],
         elo=elo(score), elo_ci95=[elo(float(np.percentile(score_boot, 2.5))), elo(float(np.percentile(score_boot, 97.5)))],
@@ -188,6 +218,7 @@ def summarize(rows):
         override_rate=sum(r['overrides'] for r in rows) / max(sum(r['plans'] for r in rows), 1),
         replans_per_turn=sum(r['plans'] for r in rows) / max(turns, 1),
         incomplete_lanes=int(sum(r['incomplete_lanes'] for r in rows)),
+        fallbacks=int(sum(r.get('fallbacks', 0) for r in rows)),
         mean_turns=float(np.mean([r['turns'] for r in rows])) if rows else 0.,
         mean_turns_decided=float(np.mean([r['turns'] for r in rows if r['reward'] != 0] or [0])),
         game_seconds_mean=float(np.mean([r['seconds'] for r in rows])) if rows else 0.,
