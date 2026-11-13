@@ -31,6 +31,12 @@ wins 13.9% (95% seed-cluster CI 11.3-16.4), 120/865 attempts**, vs PolytopAI pol
 
 ## 2. Hidden information
 
+> **Correction (2026-11-12 22:5x PT, from Jack's retail play):** the real game notifies a player when an enemy Cloak
+> is in one of the 8 tiles around one of their units, without revealing which tile. `detect` matches that
+> notification, so it is **public information, not a leak**. Our adapter set `detect` to 0 throughout, so this
+> measurement slightly handicaps Ligma in Cloak situations.
+
+
 - **Site (as served):** candidates come from the mover's public state (`public::public_state`; GEN audit d06602ae).
   Features come from engine-rs `kernels::observe(true state, player)` with the player's fog. One feature is not
   clearly public: **`detect`**, which flags an own unit adjacent to an invisible foreign unit (Cloak; `hidden_from`)
